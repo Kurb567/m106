@@ -5,7 +5,7 @@ import os
 import httpx
 from aiogram import Bot
 from aiogram.types import FSInputFile
-
+import config
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = logging.getLogger(__name__)
 
