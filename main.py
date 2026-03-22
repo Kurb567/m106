@@ -1,8 +1,10 @@
-# broadcast.py
+# main.py
 import asyncio
 import logging
 import os
 import httpx
+import config  # ← ИМПОРТ СЮДА, ВВЕРХУ!
+
 from aiogram import Bot
 from aiogram.types import FSInputFile
 
@@ -34,17 +36,12 @@ async def get_telegram_ids(token: str) -> list[int]:
             r.raise_for_status()
             data = r.json()
             
-            # 🔧 Обрабатываем оба формата ответа:
-            # Формат 1: {"users": [...], "total": 123}
-            # Формат 2: [...] (просто список)
+            # Поддерживаем оба формата ответа
             if isinstance(data, dict):
                 users = data.get("users") or data.get("data") or []
-                total = data.get("total", len(users))
             elif isinstance(data, list):
                 users = data
-                total = len(users)  # не знаем общее число, но это ок
             else:
-                logger.warning(f"⚠ Неизвестный формат ответа: {type(data)}")
                 break
             
             if not users:
@@ -64,7 +61,7 @@ async def get_telegram_ids(token: str) -> list[int]:
                     except:
                         pass
             
-            logger.info(f"Обработано: {offset + len(users)} (найдено ID: {len(ids)} / всего: {total})")
+            logger.info(f"Обработано: {offset + len(users)} (найдено ID: {len(ids)})")
             
             if len(users) < limit:
                 break
@@ -103,8 +100,6 @@ async def send_photo_to_users(chat_ids: list[int]):
         await asyncio.sleep(0.05)
     
     logger.info(f"\n📊 ИТОГ:\n✅ {ok}\n⚠ {fail}\n❓ {no_start}")
-    if no_start > 0:
-        logger.info("💡 Юзеры должны нажать /start в боте, чтобы получать сообщения!")
 
 async def main():
     try:
@@ -116,7 +111,7 @@ async def main():
             
             if not chat_ids:
                 logger.warning("⚠ Не найдено ни одного Telegram ID!")
-                logger.info("💡 Проверь: пользователи должны привязать Telegram в панели Marzban")
+                logger.info("💡 Пользователи должны привязать Telegram в панели Marzban")
                 return
                 
             await send_photo_to_users(chat_ids)
@@ -126,5 +121,4 @@ async def main():
         await bot.session.close()
 
 if __name__ == "__main__":
-    import config
     asyncio.run(main())
