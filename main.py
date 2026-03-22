@@ -5,134 +5,128 @@ import os
 from aiogram import Bot
 from aiogram.types import FSInputFile
 from aiogram.exceptions import TelegramBadRequest
-import httpx
+from marzban import MarzbanAPI
 import config
 
-# Настройка логирования
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
 
-# Инициализация бота
 bot = Bot(token=config.BOT_TOKEN)
 
-async def get_marzban_token(client: httpx.AsyncClient) -> str:
-    """Получение токена администратора Marzban"""
-    url = f"{config.MARZBAN_URL}/api/admins/token"
-    data = {
-        "username": config.MARZBAN_USER,
-        "password": config.MARZBAN_PASS
-    }
+async def get_telegram_users() -> list[int]:
+    """Получение всех telegram_id из Marzban через библиотеку marzban"""
+    
+    # Инициализация клиента (библиотека сама очистит URL от лишних слэшей)
+    api = MarzbanAPI(base_url=config.MARZBAN_URL)
+    
     try:
-        response = await client.post(url, data=data)
-        response.raise_for_status()
-        token = response.json().get("access_token")
-        logger.info("Токен Marzban получен успешно.")
-        return token
-    except Exception as e:
-        logger.error(f"Ошибка получения токена Marzban: {e}")
-        raise
-
-async def get_marzban_users(client: httpx.AsyncClient, token: str) -> list:
-    """Получение списка пользователей с telegram_id из Marzban"""
-    url = f"{config.MARZBAN_URL}/api/users"
-    headers = {"Authorization": f"Bearer {token}"}
-    
-    all_users = []
-    offset = 0
-    limit = 100  # Лимит за один запрос
-    
-    logger.info("Загрузка пользователей из Marzban...")
-    
-    while True:
-        try:
-            params = {"offset": offset, "limit": limit}
-            response = await client.get(url, headers=headers, params=params)
-            response.raise_for_status()
-            data = response.json()
+        # Авторизация
+        logger.info("Авторизация в Marzban...")
+        token_obj = await api.get_token(
+            username=config.MARZBAN_USER,
+            password=config.MARZBAN_PASS
+        )
+        token = token_obj.access_token
+        logger.info("✓ Токен получен")
+        
+        # Получение пользователей с пагинацией
+        telegram_ids = []
+        offset = 0
+        limit = 100
+        
+        logger.info("Загрузка пользователей...")
+        
+        while True:
+            response = await api.get_users(
+                token=token,
+                offset=offset,
+                limit=limit
+            )
             
-            users_list = data.get("users", [])
-            if not users_list:
+            users = response.get("users", [])
+            if not users:
                 break
                 
-            # Фильтруем только тех, у кого есть telegram_id
-            for user in users_list:
+            # Фильтруем пользователей с telegram_id
+            for user in users:
                 tg_id = user.get("telegram_id")
                 if tg_id:
-                    all_users.append(tg_id)
+                    telegram_ids.append(tg_id)
             
-            logger.info(f"Получено {len(users_list)} пользователей со страницы (всего найдено с TG: {len(all_users)})")
+            logger.info(f"Получено {len(users)} пользователей (всего с TG: {len(telegram_ids)})")
             
-            if len(users_list) < limit:
+            if len(users) < limit:
                 break
-            
+                
             offset += limit
-            await asyncio.sleep(0.5) # Небольшая пауза между запросами к API
-            
-        except Exception as e:
-            logger.error(f"Ошибка при получении пользователей: {e}")
-            break
-            
-    return all_users
+            await asyncio.sleep(0.2)  # Пауза между запросами
+        
+        return telegram_ids
+        
+    except Exception as e:
+        logger.error(f"Ошибка работы с Marzban: {e}")
+        raise
+    finally:
+        await api.close()
 
-async def send_broadcast(user_ids: list):
+async def send_broadcast(user_ids: list[int]):
     """Отправка фото всем пользователям"""
+    
     if not os.path.exists(config.PHOTO_PATH):
-        logger.error(f"Файл {config.PHOTO_PATH} не найден!")
+        logger.error(f"❌ Файл {config.PHOTO_PATH} не найден!")
         return
 
     photo = FSInputFile(config.PHOTO_PATH)
     total = len(user_ids)
-    success_count = 0
-    fail_count = 0
+    success = 0
+    failed = 0
 
-    logger.info(f"Начало рассылки. Всего пользователей: {total}")
+    logger.info(f"🚀 Начало рассылки. Всего: {total} пользователей")
 
-    for i, user_id in enumerate(user_ids):
+    for i, user_id in enumerate(user_ids, 1):
         try:
             await bot.send_photo(
                 chat_id=user_id,
                 photo=photo,
                 caption=config.CAPTION
             )
-            success_count += 1
-            logger.info(f"[{i+1}/{total}] Отправлено пользователю {user_id}")
+            success += 1
+            logger.info(f"[{i}/{total}] ✓ Отправлено пользователю {user_id}")
+            
         except TelegramBadRequest as e:
-            fail_count += 1
-            # 403 Forbidden means user blocked the bot
-            if "Forbidden" in str(e):
-                logger.warning(f"Пользователь {user_id} заблокировал бота.")
+            failed += 1
+            if "Forbidden" in str(e) or "bot was blocked" in str(e).lower():
+                logger.warning(f"[{i}/{total}] ⚠ Пользователь {user_id} заблокировал бота")
             else:
-                logger.error(f"Ошибка отправки пользователю {user_id}: {e}")
+                logger.error(f"[{i}/{total}] ✗ Ошибка: {e}")
+                
         except Exception as e:
-            fail_count += 1
-            logger.error(f"Неизвестная ошибка для {user_id}: {e}")
+            failed += 1
+            logger.error(f"[{i}/{total}] ✗ Неизвестная ошибка: {e}")
         
-        # Задержка чтобы не упереться в лимиты Telegram (30 сообщений в сек)
-        # 0.05 сек задержки достаточно для безопасности
+        # Задержка для соблюдения лимитов Telegram (~30 msg/sec)
         await asyncio.sleep(0.05)
 
-    logger.info(f"Рассылка завершена. Успешно: {success_count}, Ошибки/Блоки: {fail_count}")
+    logger.info(f"\n✅ Рассылка завершена!\n   Успешно: {success}\n   Ошибки/блоки: {failed}")
 
 async def main():
-    async with httpx.AsyncClient() as client:
-        try:
-            # 1. Авторизация в Marzban
-            token = await get_marzban_token(client)
+    try:
+        # 1. Получаем список Telegram ID
+        user_ids = await get_telegram_users()
+        
+        if not user_ids:
+            logger.warning("⚠ Список пользователей пуст. Никому нечего отправлять.")
+            logger.info("💡 Убедитесь, что пользователи привязали Telegram в панели Marzban")
+            return
             
-            # 2. Получение пользователей
-            user_ids = await get_marzban_users(client, token)
-            
-            if not user_ids:
-                logger.warning("Список пользователей пуст. Никому нечего отправлять.")
-                return
-
-            # 3. Рассылка
-            await send_broadcast(user_ids)
-            
-        except Exception as e:
-            logger.critical(f"Критическая ошибка в главном цикле: {e}")
-        finally:
-            await bot.session.close()
+        # 2. Отправляем рассылку
+        await send_broadcast(user_ids)
+        
+    except Exception as e:
+        logger.critical(f"💥 Критическая ошибка: {e}")
+    finally:
+        await bot.session.close()
+        logger.info("🔚 Сессия бота закрыта")
 
 if __name__ == "__main__":
     asyncio.run(main())
