@@ -16,7 +16,6 @@ bot = Bot(token=config.BOT_TOKEN)
 async def get_telegram_users() -> list[int]:
     """Получение всех telegram_id из Marzban через библиотеку marzban"""
     
-    # Инициализация клиента (библиотека сама очистит URL от лишних слэшей)
     api = MarzbanAPI(base_url=config.MARZBAN_URL)
     
     try:
@@ -30,41 +29,46 @@ async def get_telegram_users() -> list[int]:
         logger.info("✓ Токен получен")
         
         # Получение пользователей с пагинацией
-        telegram_ids = []
+        telegram_ids: list[int] = []
         offset = 0
         limit = 100
         
         logger.info("Загрузка пользователей...")
         
         while True:
+            # Библиотека возвращает UsersResponse (Pydantic модель)
             response = await api.get_users(
                 token=token,
                 offset=offset,
                 limit=limit
             )
             
-            users = response.get("users", [])
+            # Доступ к полям через атрибуты, не .get()!
+            users = response.users  # список объектов User
+            total = response.total  # общее количество
+            
             if not users:
                 break
                 
             # Фильтруем пользователей с telegram_id
             for user in users:
-                tg_id = user.get("telegram_id")
-                if tg_id:
+                tg_id = user.telegram_id  # атрибут, не словарь!
+                if tg_id is not None:
                     telegram_ids.append(tg_id)
             
-            logger.info(f"Получено {len(users)} пользователей (всего с TG: {len(telegram_ids)})")
+            logger.info(f"Получено {len(users)} пользователей (всего с TG: {len(telegram_ids)} из {total})")
             
+            # Если получили меньше лимита — это последняя страница
             if len(users) < limit:
                 break
                 
             offset += limit
-            await asyncio.sleep(0.2)  # Пауза между запросами
+            await asyncio.sleep(0.2)
         
         return telegram_ids
         
     except Exception as e:
-        logger.error(f"Ошибка работы с Marzban: {e}")
+        logger.error(f"❌ Ошибка работы с Marzban: {type(e).__name__}: {e}")
         raise
     finally:
         await api.close()
@@ -95,35 +99,34 @@ async def send_broadcast(user_ids: list[int]):
             
         except TelegramBadRequest as e:
             failed += 1
-            if "Forbidden" in str(e) or "bot was blocked" in str(e).lower():
+            error_text = str(e).lower()
+            if "forbidden" in error_text or "blocked" in error_text:
                 logger.warning(f"[{i}/{total}] ⚠ Пользователь {user_id} заблокировал бота")
             else:
-                logger.error(f"[{i}/{total}] ✗ Ошибка: {e}")
+                logger.error(f"[{i}/{total}] ✗ TelegramBadRequest: {e}")
                 
         except Exception as e:
             failed += 1
-            logger.error(f"[{i}/{total}] ✗ Неизвестная ошибка: {e}")
+            logger.error(f"[{i}/{total}] ✗ Ошибка: {type(e).__name__}: {e}")
         
-        # Задержка для соблюдения лимитов Telegram (~30 msg/sec)
+        # Безопасная задержка для лимитов Telegram
         await asyncio.sleep(0.05)
 
     logger.info(f"\n✅ Рассылка завершена!\n   Успешно: {success}\n   Ошибки/блоки: {failed}")
 
 async def main():
     try:
-        # 1. Получаем список Telegram ID
         user_ids = await get_telegram_users()
         
         if not user_ids:
-            logger.warning("⚠ Список пользователей пуст. Никому нечего отправлять.")
-            logger.info("💡 Убедитесь, что пользователи привязали Telegram в панели Marzban")
+            logger.warning("⚠ Список пользователей пуст.")
+            logger.info("💡 Проверьте: пользователи должны привязать Telegram в панели Marzban")
             return
             
-        # 2. Отправляем рассылку
         await send_broadcast(user_ids)
         
     except Exception as e:
-        logger.critical(f"💥 Критическая ошибка: {e}")
+        logger.critical(f"💥 Критическая ошибка: {type(e).__name__}: {e}")
     finally:
         await bot.session.close()
         logger.info("🔚 Сессия бота закрыта")
