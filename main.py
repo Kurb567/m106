@@ -100,21 +100,18 @@ async def main():
             if not chat_id:
                 # Если у пользователя не привязан телеграм аккаунт
                 continue
-
             try:
-                # Отправка фото
-                # photo может быть путём к файлу (types.FSInputFile) или URL (строка)
+                # Создаём объект файла для отправки
+                photo_file = FSInputFile(CONFIG['photo_path'])
+                
                 await bot.send_photo(
                     chat_id=chat_id,
-                    photo=CONFIG['photo_path'],
+                    photo=photo_file,  # <--- Передаём объект FSInputFile
                     caption=CONFIG['caption']
                 )
-                print(f"✅ Отправлено пользователю: {username} ({chat_id})")
+                print(f"✅ Отправлено: {chat_id}")
                 success_count += 1
-                
-                # Небольшая задержка, чтобы не упереться в лимиты Telegram (30 сообщений в секунду)
-                await asyncio.sleep(0.05) 
-                
+                await asyncio.sleep(0.05)        
             except TelegramBadRequest as e:
                 # Частые ошибки: бот заблокирован или пользователь не запускал бота
                 if "bot was blocked" in str(e) or "chat not found" in str(e):
