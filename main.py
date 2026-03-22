@@ -5,14 +5,13 @@ import os
 import httpx
 from aiogram import Bot
 from aiogram.types import FSInputFile
-import config
+
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 bot = Bot(token=config.BOT_TOKEN)
 
 async def get_marzban_token(client: httpx.AsyncClient) -> str:
-    """Получаем токен админа"""
     url = f"{config.MARZBAN_URL}/api/admin/token"
     r = await client.post(url, data={
         "username": config.MARZBAN_USER,
@@ -22,7 +21,6 @@ async def get_marzban_token(client: httpx.AsyncClient) -> str:
     return r.json()["access_token"]
 
 async def get_telegram_ids(token: str) -> list[int]:
-    """Получаем список числовых Telegram ID"""
     url = f"{config.MARZBAN_URL}/api/users"
     headers = {"Authorization": f"Bearer {token}"}
     
@@ -35,13 +33,25 @@ async def get_telegram_ids(token: str) -> list[int]:
             r = await client.get(url, headers=headers, params={"offset": offset, "limit": limit})
             r.raise_for_status()
             data = r.json()
-            users = data.get("users", [])
+            
+            # 🔧 Обрабатываем оба формата ответа:
+            # Формат 1: {"users": [...], "total": 123}
+            # Формат 2: [...] (просто список)
+            if isinstance(data, dict):
+                users = data.get("users") or data.get("data") or []
+                total = data.get("total", len(users))
+            elif isinstance(data, list):
+                users = data
+                total = len(users)  # не знаем общее число, но это ок
+            else:
+                logger.warning(f"⚠ Неизвестный формат ответа: {type(data)}")
+                break
             
             if not users:
                 break
                 
             for u in users:
-                # 🔍 Пытаемся найти ID во всех возможных полях
+                # Ищем Telegram ID во всех возможных полях
                 tg = (
                     u.get("telegram_id") or 
                     u.get("telegram") or 
@@ -52,9 +62,9 @@ async def get_telegram_ids(token: str) -> list[int]:
                     try:
                         ids.append(int(str(tg).strip().lstrip("@")))
                     except:
-                        pass  # пропускаем если не число
+                        pass
             
-            logger.info(f"Обработано: {offset + len(users)} / {data.get('total', '?')} (найдено ID: {len(ids)})")
+            logger.info(f"Обработано: {offset + len(users)} (найдено ID: {len(ids)} / всего: {total})")
             
             if len(users) < limit:
                 break
@@ -64,7 +74,6 @@ async def get_telegram_ids(token: str) -> list[int]:
     return ids
 
 async def send_photo_to_users(chat_ids: list[int]):
-    """Рассылка фото"""
     if not os.path.exists(config.PHOTO_PATH):
         logger.error(f"❌ Файл {config.PHOTO_PATH} не найден!")
         return
@@ -73,7 +82,7 @@ async def send_photo_to_users(chat_ids: list[int]):
     total = len(chat_ids)
     ok = fail = no_start = 0
     
-    logger.info(f"🚀 Начинаю рассылку: {total} получателей")
+    logger.info(f"🚀 Рассылка: {total} получателей")
     
     for i, cid in enumerate(chat_ids, 1):
         try:
@@ -91,11 +100,11 @@ async def send_photo_to_users(chat_ids: list[int]):
             else:
                 fail += 1
                 logger.error(f"[{i}/{total}] ✗ {cid}: {e}")
-        await asyncio.sleep(0.05)  # чтобы не забанили
+        await asyncio.sleep(0.05)
     
-    logger.info(f"\n📊 ГОТОВО:\n✅ {ok}\n⚠ {fail}\n❓ {no_start}")
+    logger.info(f"\n📊 ИТОГ:\n✅ {ok}\n⚠ {fail}\n❓ {no_start}")
     if no_start > 0:
-        logger.info("💡 Чтобы получать сообщения — пользователи должны нажать /start в боте!")
+        logger.info("💡 Юзеры должны нажать /start в боте, чтобы получать сообщения!")
 
 async def main():
     try:
@@ -112,10 +121,10 @@ async def main():
                 
             await send_photo_to_users(chat_ids)
     except Exception as e:
-        logger.error(f"💥 Ошибка: {e}")
+        logger.error(f"💥 Ошибка: {e}", exc_info=True)
     finally:
         await bot.session.close()
 
 if __name__ == "__main__":
-    import config  # импорт после настройки логгера
+    import config
     asyncio.run(main())
