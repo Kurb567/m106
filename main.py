@@ -3,7 +3,7 @@ import asyncio
 import logging
 import os
 import httpx
-import config  # ← ИМПОРТ СЮДА, ВВЕРХУ!
+import config
 
 from aiogram import Bot
 from aiogram.types import FSInputFile
@@ -21,6 +21,52 @@ async def get_marzban_token(client: httpx.AsyncClient) -> str:
     })
     r.raise_for_status()
     return r.json()["access_token"]
+
+def safe_get_telegram_id(user: dict) -> int | None:
+    """Безопасное извлечение Telegram ID из пользователя (любая структура)"""
+    if not isinstance(user, dict):
+        return None
+    
+    # Прямые поля
+    for key in ["telegram_id", "telegram", "tg_id", "tg"]:
+        val = user.get(key)
+        if val is not None:
+            try:
+                return int(str(val).strip().lstrip("@"))
+            except:
+                pass
+    
+    # Поле links (может быть dict, list или None)
+    links = user.get("links")
+    if isinstance(links, dict):
+        for key in ["telegram", "telegram_id", "tg_id"]:
+            val = links.get(key)
+            if val is not None:
+                try:
+                    return int(str(val).strip().lstrip("@"))
+                except:
+                    pass
+    elif isinstance(links, list):
+        # Если links — список, ищем в нём словари с нужными ключами
+        for item in links:
+            if isinstance(item, dict):
+                for key in ["telegram", "telegram_id", "tg_id", "id"]:
+                    val = item.get(key)
+                    if val is not None and str(val).isdigit():
+                        try:
+                            return int(val)
+                        except:
+                            pass
+    
+    # Поле telegram_username (если вдруг там числовой ID)
+    tg_user = user.get("telegram_username")
+    if tg_user and str(tg_user).isdigit():
+        try:
+            return int(tg_user)
+        except:
+            pass
+    
+    return None
 
 async def get_telegram_ids(token: str) -> list[int]:
     url = f"{config.MARZBAN_URL}/api/users"
@@ -48,18 +94,9 @@ async def get_telegram_ids(token: str) -> list[int]:
                 break
                 
             for u in users:
-                # Ищем Telegram ID во всех возможных полях
-                tg = (
-                    u.get("telegram_id") or 
-                    u.get("telegram") or 
-                    u.get("tg_id") or
-                    (u.get("links") or {}).get("telegram")
-                )
-                if tg:
-                    try:
-                        ids.append(int(str(tg).strip().lstrip("@")))
-                    except:
-                        pass
+                tg_id = safe_get_telegram_id(u)
+                if tg_id:
+                    ids.append(tg_id)
             
             logger.info(f"Обработано: {offset + len(users)} (найдено ID: {len(ids)})")
             
