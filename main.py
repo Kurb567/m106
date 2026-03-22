@@ -12,7 +12,7 @@ CONFIG = {
     "marzban_password": "56731096842",       # Пароль админа Marzban
 
     # Данные от Telegram бота
-    "bot_token": "8557116313:AAEqp_YBnxLfXZX9VVP5Dtg5XtRZFvIySgw", # Токен от @BotFather
+    "bot_token": "8557116313:AAEqp_YBnxLfXZX9VVP5Dtg5XtRZFvIySgw",
     
     # Путь к фото (локальный файл) или URL картинки
     # Если локальный: "photo.jpg"
