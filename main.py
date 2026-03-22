@@ -2,6 +2,7 @@ import asyncio
 import httpx
 from aiogram import Bot, types
 from aiogram.exceptions import TelegramBadRequest
+from aiogram.types import FSInputFile
 
 # ================= КОНФИГУРАЦИЯ =================
 CONFIG = {
