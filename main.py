@@ -94,8 +94,8 @@ async def main():
         for user in users:
             # В Marzban поле с Telegram ID называется 'telegram_id'
             # Если вы храните ID в поле 'username' (что нестандартно), замените user['telegram_id'] на user['username']
-            chat_id = user.get('telegram_id')
-            username = user.get('username') # Имя пользователя в панели (для логов)
+            chat_id = user.get('username')
+            username = user.get('') # Имя пользователя в панели (для логов)
 
             if not chat_id:
                 # Если у пользователя не привязан телеграм аккаунт
