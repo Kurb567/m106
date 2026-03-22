@@ -2,146 +2,120 @@
 import asyncio
 import logging
 import os
+import httpx
 from aiogram import Bot
 from aiogram.types import FSInputFile
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from marzban import MarzbanAPI
-import config
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(message)s")
 logger = logging.getLogger(__name__)
 
 bot = Bot(token=config.BOT_TOKEN)
 
-def parse_telegram_field(value) -> int | str | None:
-    """
-    Преобразует значение из Marzban в правильный формат для отправки:
-    - Если число (строка или int) → возвращает int (chat_id)
-    - Если юзернейм (строка с буквами) → возвращает строку с @
-    - Если пусто → None
-    """
-    if value is None:
-        return None
-    
-    value_str = str(value).strip().lstrip('@')
-    if not value_str:
-        return None
-    
-    # Если всё символы цифровые — это chat_id
-    if value_str.isdigit():
-        return int(value_str)
-    
-    # Иначе считаем это юзернеймом
-    return f"@{value_str}"
+async def get_marzban_token(client: httpx.AsyncClient) -> str:
+    """Получаем токен админа"""
+    url = f"{config.MARZBAN_URL}/api/admin/token"
+    r = await client.post(url, data={
+        "username": config.MARZBAN_USER,
+        "password": config.MARZBAN_PASS
+    })
+    r.raise_for_status()
+    return r.json()["access_token"]
 
-async def get_telegram_targets() -> list[int | str]:
-    """Получение списка chat_id / username из Marzban"""
-    api = MarzbanAPI(base_url=config.MARZBAN_URL)
+async def get_telegram_ids(token: str) -> list[int]:
+    """Получаем список числовых Telegram ID"""
+    url = f"{config.MARZBAN_URL}/api/users"
+    headers = {"Authorization": f"Bearer {token}"}
     
-    try:
-        logger.info("🔐 Авторизация в Marzban...")
-        token_obj = await api.get_token(
-            username=config.MARZBAN_USER,
-            password=config.MARZBAN_PASS
-        )
-        token = token_obj.access_token
-        logger.info("✅ Токен получен")
-        
-        targets: list[int | str] = []
-        offset = 0
-        limit = 100
-        
-        logger.info("👥 Загрузка пользователей...")
-        
+    ids = []
+    offset = 0
+    limit = 100
+    
+    async with httpx.AsyncClient() as client:
         while True:
-            response = await api.get_users(token=token, offset=offset, limit=limit)
-            users = response.users
+            r = await client.get(url, headers=headers, params={"offset": offset, "limit": limit})
+            r.raise_for_status()
+            data = r.json()
+            users = data.get("users", [])
+            
             if not users:
                 break
                 
-            for user in users:
-                user_dict = user.model_dump()
-                
-                # Пробуем разные названия полей
-                tg_value = (
-                    user_dict.get("telegram_id") or 
-                    user_dict.get("telegram") or 
-                    user_dict.get("telegram_username") or
-                    user_dict.get("tg_id")
+            for u in users:
+                # 🔍 Пытаемся найти ID во всех возможных полях
+                tg = (
+                    u.get("telegram_id") or 
+                    u.get("telegram") or 
+                    u.get("tg_id") or
+                    (u.get("links") or {}).get("telegram")
                 )
-                
-                parsed = parse_telegram_field(tg_value)
-                if parsed is not None:
-                    targets.append(parsed)
+                if tg:
+                    try:
+                        ids.append(int(str(tg).strip().lstrip("@")))
+                    except:
+                        pass  # пропускаем если не число
             
-            logger.info(f"📦 Страница: {len(users)} юзеров (найдено: {len(targets)} из {response.total})")
+            logger.info(f"Обработано: {offset + len(users)} / {data.get('total', '?')} (найдено ID: {len(ids)})")
+            
             if len(users) < limit:
                 break
             offset += limit
-            await asyncio.sleep(0.2)
-        
-        return targets
-        
-    except Exception as e:
-        logger.error(f"❌ Ошибка Marzban: {type(e).__name__}: {e}")
-        raise
-    finally:
-        await api.close()
+            await asyncio.sleep(0.3)
+    
+    return ids
 
-async def send_broadcast(targets: list[int | str]):
+async def send_photo_to_users(chat_ids: list[int]):
+    """Рассылка фото"""
     if not os.path.exists(config.PHOTO_PATH):
         logger.error(f"❌ Файл {config.PHOTO_PATH} не найден!")
         return
-
+    
     photo = FSInputFile(config.PHOTO_PATH)
-    total = len(targets)
-    success = failed = not_found = 0
-
-    logger.info(f"🚀 Старт рассылки. Всего: {total} получателей")
-
-    for i, target in enumerate(targets, 1):
-        # Для лога: красиво отображаем куда отправляем
-        target_display = f"@{target}" if isinstance(target, str) else target
-        print(target)
+    total = len(chat_ids)
+    ok = fail = no_start = 0
+    
+    logger.info(f"🚀 Начинаю рассылку: {total} получателей")
+    
+    for i, cid in enumerate(chat_ids, 1):
         try:
-            await bot.send_photo(chat_id=target, photo=photo, caption=config.CAPTION)
-            success += 1
-            logger.info(f"[{i}/{total}] ✓ Отправлено {target_display}")
-            
-        except TelegramForbiddenError:
-            failed += 1
-            logger.warning(f"[{i}/{total}] ⚠ {target_display} заблокировал бота")
-            
-        except TelegramBadRequest as e:
-            err = str(e).lower()
-            if "chat not found" in err or "user not found" in err or "peer id invalid" in err:
-                not_found += 1
-                logger.warning(f"[{i}/{total}] ❓ {target_display} — пользователь не запускал бота")
-            else:
-                failed += 1
-                logger.error(f"[{i}/{total}] ✗ {target_display}: {e}")
-                
+            await bot.send_photo(chat_id=cid, photo=photo, caption=config.CAPTION)
+            ok += 1
+            logger.info(f"[{i}/{total}] ✓ {cid}")
         except Exception as e:
-            failed += 1
-            logger.error(f"[{i}/{total}] ✗ {target_display}: {type(e).__name__}: {e}")
-        
-        await asyncio.sleep(0.05)  # защита от лимитов
-
-    logger.info(f"\n📊 Итоги:\n   ✓ Успешно: {success}\n   ⚠ Заблокировали: {failed}\n   ❓ Не запускали бота: {not_found}")
-    if not_found > 0:
-        logger.info("💡 Чтобы получать рассылку — пользователи должны нажать /start в боте!")
+            err = str(e).lower()
+            if "forbidden" in err or "blocked" in err:
+                fail += 1
+                logger.warning(f"[{i}/{total}] ⚠ Заблокировал: {cid}")
+            elif "chat not found" in err or "peer id invalid" in err:
+                no_start += 1
+                logger.warning(f"[{i}/{total}] ❓ Не запускал бота: {cid}")
+            else:
+                fail += 1
+                logger.error(f"[{i}/{total}] ✗ {cid}: {e}")
+        await asyncio.sleep(0.05)  # чтобы не забанили
+    
+    logger.info(f"\n📊 ГОТОВО:\n✅ {ok}\n⚠ {fail}\n❓ {no_start}")
+    if no_start > 0:
+        logger.info("💡 Чтобы получать сообщения — пользователи должны нажать /start в боте!")
 
 async def main():
     try:
-        targets = await get_telegram_targets()
-        if not targets:
-            logger.warning("⚠ Не найдено ни одного Telegram-контакта в Marzban!")
-            return
-        await send_broadcast(targets)
+        async with httpx.AsyncClient() as client:
+            token = await get_marzban_token(client)
+            logger.info("✅ Токен получен")
+            
+            chat_ids = await get_telegram_ids(token)
+            
+            if not chat_ids:
+                logger.warning("⚠ Не найдено ни одного Telegram ID!")
+                logger.info("💡 Проверь: пользователи должны привязать Telegram в панели Marzban")
+                return
+                
+            await send_photo_to_users(chat_ids)
     except Exception as e:
-        logger.critical(f"💥 Критическая ошибка: {type(e).__name__}: {e}")
+        logger.error(f"💥 Ошибка: {e}")
     finally:
         await bot.session.close()
 
 if __name__ == "__main__":
+    import config  # импорт после настройки логгера
     asyncio.run(main())
