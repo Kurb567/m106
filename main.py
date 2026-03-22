@@ -1,4 +1,4 @@
-# broadcast.py — исправленная версия для username
+# broadcast.py
 import asyncio
 import logging
 import os
@@ -13,8 +13,29 @@ logger = logging.getLogger(__name__)
 
 bot = Bot(token=config.BOT_TOKEN)
 
-async def get_telegram_usernames() -> list[str]:
-    """Получение всех telegram_username из Marzban"""
+def parse_telegram_field(value) -> int | str | None:
+    """
+    Преобразует значение из Marzban в правильный формат для отправки:
+    - Если число (строка или int) → возвращает int (chat_id)
+    - Если юзернейм (строка с буквами) → возвращает строку с @
+    - Если пусто → None
+    """
+    if value is None:
+        return None
+    
+    value_str = str(value).strip().lstrip('@')
+    if not value_str:
+        return None
+    
+    # Если всё символы цифровые — это chat_id
+    if value_str.isdigit():
+        return int(value_str)
+    
+    # Иначе считаем это юзернеймом
+    return f"@{value_str}"
+
+async def get_telegram_targets() -> list[int | str]:
+    """Получение списка chat_id / username из Marzban"""
     api = MarzbanAPI(base_url=config.MARZBAN_URL)
     
     try:
@@ -26,7 +47,7 @@ async def get_telegram_usernames() -> list[str]:
         token = token_obj.access_token
         logger.info("✅ Токен получен")
         
-        usernames: list[str] = []
+        targets: list[int | str] = []
         offset = 0
         limit = 100
         
@@ -40,26 +61,26 @@ async def get_telegram_usernames() -> list[str]:
                 
             for user in users:
                 user_dict = user.model_dump()
-                # Ищем поле с юзернеймом (может называться по-разному)
-                tg_user = (
-                    user_dict.get("telegram_username") or 
+                
+                # Пробуем разные названия полей
+                tg_value = (
+                    user_dict.get("telegram_id") or 
                     user_dict.get("telegram") or 
-                    user_dict.get("tg_username") or
-                    user_dict.get("username")  # осторожно: это может быть логин Marzban
+                    user_dict.get("telegram_username") or
+                    user_dict.get("tg_id")
                 )
-                if tg_user and isinstance(tg_user, str) and tg_user.strip():
-                    # Убираем @ если есть, добавим потом
-                    clean = tg_user.strip().lstrip('@')
-                    if clean:  # не пустой
-                        usernames.append(clean)
+                
+                parsed = parse_telegram_field(tg_value)
+                if parsed is not None:
+                    targets.append(parsed)
             
-            logger.info(f"📦 Страница: {len(users)} юзеров (найдено юзернеймов: {len(usernames)} из {response.total})")
+            logger.info(f"📦 Страница: {len(users)} юзеров (найдено: {len(targets)} из {response.total})")
             if len(users) < limit:
                 break
             offset += limit
             await asyncio.sleep(0.2)
         
-        return usernames
+        return targets
         
     except Exception as e:
         logger.error(f"❌ Ошибка Marzban: {type(e).__name__}: {e}")
@@ -67,55 +88,56 @@ async def get_telegram_usernames() -> list[str]:
     finally:
         await api.close()
 
-async def send_broadcast(usernames: list[str]):
+async def send_broadcast(targets: list[int | str]):
     if not os.path.exists(config.PHOTO_PATH):
         logger.error(f"❌ Файл {config.PHOTO_PATH} не найден!")
         return
 
     photo = FSInputFile(config.PHOTO_PATH)
-    total = len(usernames)
-    success = failed = skipped = 0
+    total = len(targets)
+    success = failed = not_found = 0
 
-    logger.info(f"🚀 Старт рассылки. Всего: {total} юзернеймов")
+    logger.info(f"🚀 Старт рассылки. Всего: {total} получателей")
 
-    for i, username in enumerate(usernames, 1):
-        chat_id = f"@{username}"  # формат для отправки
+    for i, target in enumerate(targets, 1):
+        # Для лога: красиво отображаем куда отправляем
+        target_display = f"@{target}" if isinstance(target, str) else target
         
         try:
-            await bot.send_photo(chat_id=chat_id, photo=photo, caption=config.CAPTION)
+            await bot.send_photo(chat_id=target, photo=photo, caption=config.CAPTION)
             success += 1
-            logger.info(f"[{i}/{total}] ✓ Отправлено @{username}")
+            logger.info(f"[{i}/{total}] ✓ Отправлено {target_display}")
             
         except TelegramForbiddenError:
             failed += 1
-            logger.warning(f"[{i}/{total}] ⚠ @{username} заблокировал бота или бот не знает этого пользователя")
+            logger.warning(f"[{i}/{total}] ⚠ {target_display} заблокировал бота")
             
         except TelegramBadRequest as e:
-            failed += 1
             err = str(e).lower()
-            if "chat not found" in err or "user not found" in err:
-                skipped += 1
-                logger.warning(f"[{i}/{total}] ❓ @{username} — бот не может найти этот чат (пользователь не запускал бота)")
+            if "chat not found" in err or "user not found" in err or "peer id invalid" in err:
+                not_found += 1
+                logger.warning(f"[{i}/{total}] ❓ {target_display} — пользователь не запускал бота")
             else:
-                logger.error(f"[{i}/{total}] ✗ @{username}: {e}")
+                failed += 1
+                logger.error(f"[{i}/{total}] ✗ {target_display}: {e}")
                 
         except Exception as e:
             failed += 1
-            logger.error(f"[{i}/{total}] ✗ @{username}: {type(e).__name__}: {e}")
+            logger.error(f"[{i}/{total}] ✗ {target_display}: {type(e).__name__}: {e}")
         
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0.05)  # защита от лимитов
 
-    logger.info(f"\n📊 Итоги:\n   ✓ Успешно: {success}\n   ⚠ Не доставлено: {failed}\n   ❓ Не найдено в боте: {skipped}")
-    if skipped > 0:
-        logger.info("💡 Чтобы рассылка работала — пользователи должны нажать /start в боте!")
+    logger.info(f"\n📊 Итоги:\n   ✓ Успешно: {success}\n   ⚠ Заблокировали: {failed}\n   ❓ Не запускали бота: {not_found}")
+    if not_found > 0:
+        logger.info("💡 Чтобы получать рассылку — пользователи должны нажать /start в боте!")
 
 async def main():
     try:
-        usernames = await get_telegram_usernames()
-        if not usernames:
-            logger.warning("⚠ Не найдено ни одного Telegram-юзернейма в Marzban!")
+        targets = await get_telegram_targets()
+        if not targets:
+            logger.warning("⚠ Не найдено ни одного Telegram-контакта в Marzban!")
             return
-        await send_broadcast(usernames)
+        await send_broadcast(targets)
     except Exception as e:
         logger.critical(f"💥 Критическая ошибка: {type(e).__name__}: {e}")
     finally:
