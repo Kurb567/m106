@@ -14,12 +14,11 @@ logger = logging.getLogger(__name__)
 bot = Bot(token=config.BOT_TOKEN)
 
 async def get_telegram_users() -> list[int]:
-    """Получение всех telegram_id из Marzban через библиотеку marzban"""
+    """Получение всех telegram_id из Marzban"""
     
     api = MarzbanAPI(base_url=config.MARZBAN_URL)
     
     try:
-        # Авторизация
         logger.info("Авторизация в Marzban...")
         token_obj = await api.get_token(
             username=config.MARZBAN_USER,
@@ -28,7 +27,6 @@ async def get_telegram_users() -> list[int]:
         token = token_obj.access_token
         logger.info("✓ Токен получен")
         
-        # Получение пользователей с пагинацией
         telegram_ids: list[int] = []
         offset = 0
         limit = 100
@@ -36,29 +34,32 @@ async def get_telegram_users() -> list[int]:
         logger.info("Загрузка пользователей...")
         
         while True:
-            # Библиотека возвращает UsersResponse (Pydantic модель)
             response = await api.get_users(
                 token=token,
                 offset=offset,
                 limit=limit
             )
             
-            # Доступ к полям через атрибуты, не .get()!
-            users = response.users  # список объектов User
-            total = response.total  # общее количество
-            
+            users = response.users
             if not users:
                 break
                 
-            # Фильтруем пользователей с telegram_id
             for user in users:
-                tg_id = user.telegram_id  # атрибут, не словарь!
+                # 🔑 КЛЮЧЕВОЙ МОМЕНТ: используем model_dump() для доступа ко всем полям
+                user_dict = user.model_dump()
+                
+                # Пробуем разные возможные названия поля
+                tg_id = (
+                    user_dict.get("telegram_id") or 
+                    user_dict.get("telegram") or 
+                    user_dict.get("tg_id")
+                )
+                
                 if tg_id is not None:
-                    telegram_ids.append(tg_id)
+                    telegram_ids.append(int(tg_id))
             
-            logger.info(f"Получено {len(users)} пользователей (всего с TG: {len(telegram_ids)} из {total})")
+            logger.info(f"Получено {len(users)} пользователей (всего с TG: {len(telegram_ids)} из {response.total})")
             
-            # Если получили меньше лимита — это последняя страница
             if len(users) < limit:
                 break
                 
@@ -109,7 +110,6 @@ async def send_broadcast(user_ids: list[int]):
             failed += 1
             logger.error(f"[{i}/{total}] ✗ Ошибка: {type(e).__name__}: {e}")
         
-        # Безопасная задержка для лимитов Telegram
         await asyncio.sleep(0.05)
 
     logger.info(f"\n✅ Рассылка завершена!\n   Успешно: {success}\n   Ошибки/блоки: {failed}")
